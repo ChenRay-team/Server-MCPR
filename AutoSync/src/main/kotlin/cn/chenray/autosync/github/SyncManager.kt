@@ -58,7 +58,9 @@ class SyncManager(private val plugin: AutoSyncPlugin) {
             logger.info("[AutoSync] 发现 ${localFiles.size} 个录像文件")
 
             // 2) 远程现有文件（player 目录下）—— 一次性获取，避免每个文件单独请求
+            //    key 统一用 cleanPath 之后的路径，与上传路径保持一致
             val remoteFiles = client.listRemoteTree("player")
+                .mapKeys { (rawPath, _) -> cleanPath(rawPath) }
 
             // 3) 过滤出需要上传的文件（本地有、远程没有；跳过超大）
             val pending = localFiles.entries
@@ -95,8 +97,9 @@ class SyncManager(private val plugin: AutoSyncPlugin) {
 
                 val cleanRelPath = cleanPath(relPath)
                 val remotePath = "player/$cleanRelPath"
+                val remoteSha = remoteFiles[cleanRelPath]
                 // 流式上传：读文件 → base64 → PUT（不整文件进内存）
-                if (client.putFileStream(remotePath, localFile, null)) {
+                if (client.putFileStream(remotePath, localFile, remoteSha)) {
                     pushed++
                     batchBytes += size
                     batchCount++
@@ -128,15 +131,29 @@ class SyncManager(private val plugin: AutoSyncPlugin) {
     }
 
     /**
-     * 把相对路径中每个目录段的 "名字@uuid" 转换为 "名字"。
+     * 只清理路径中的【玩家目录名】"名字@uuid" → "名字"。
+     * 注意：绝对不动文件名的 @ 部分！
+     *
+     * ISeeYou 录像结构：
+     *   player/玩家名@uuid/2026-08-02@14-30-25.mcpr
+     *                ^^^^^^ 目录名含@uuid，要去掉
+     *                              ^^^^^^^^^^^^^^^^ 文件名含@（日期），必须保留！
+     *
      * 例如：
-     *   "张三@a1b2c3d4-e5f6/2026-08-13.mcpr"
-     *     → "张三/2026-08-13.mcpr"
+     *   "张三@a1b2c3d4/2026-08-02@14-30-25.mcpr"
+     *     → "张三/2026-08-02@14-30-25.mcpr"
      */
     private fun cleanPath(relPath: String): String {
-        return relPath.split("/").joinToString("/") { seg ->
-            if (seg.contains("@")) seg.substringBefore("@") else seg
-        }
+        val parts = relPath.split("/")
+        // 只处理除最后一个（文件名）以外的所有段
+        return parts.dropLast(1)
+            .joinToString("/") { seg ->
+                if (seg.contains("@")) seg.substringBefore("@") else seg
+            }
+            .let { dirPart ->
+                if (dirPart.isEmpty()) parts.last()
+                else "$dirPart/${parts.last()}"
+            }
     }
 
     /** 递归收集 replay 目录下所有 .mcpr 文件 */
