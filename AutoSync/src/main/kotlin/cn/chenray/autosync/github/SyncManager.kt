@@ -5,10 +5,11 @@ import java.io.File
 import java.nio.file.Files
 
 /**
- * 双向同步管理器：
- *  - 推送：本地新增/修改的文件上传到仓库
- *  - 拉取：仓库有而本地没有的文件下载到本地
- *  - 删除：本地删掉的文件在仓库也删除（可选）
+ * 同步管理器（录像模式）：
+ *  - 扫描服务器根目录 replay/player 下的 .mcpr 录像（含 玩家名/ 子目录）
+ *  - 单向上传：本地 → GitHub，不反向拉取（录像不回写服务器）
+ *  - 自动跳过超过 100MB 的文件（GitHub Contents API 限制）
+ *  - 保留本地文件（只上传不删除）
  */
 class SyncManager(private val plugin: AutoSyncPlugin) {
 
@@ -17,58 +18,58 @@ class SyncManager(private val plugin: AutoSyncPlugin) {
         GitHubClient(cfg.owner, cfg.repo, cfg.token, cfg.branch)
     }
 
-    private val localRoot: File
-        get() = File(plugin.dataFolder.parentFile, cfg.localFolder)
+    /** 服务器根目录（server.jar 同级，即翼龙 /home/container） */
+    private val serverRoot: File
+        get() = plugin.dataFolder.parentFile.parentFile
+
+    /** replay/player 根目录：/home/container/replay/player */
+    private val playerRoot: File
+        get() = File(File(serverRoot, "replay"), "player")
 
     fun syncNow() {
         try {
             val start = System.currentTimeMillis()
             val logger = plugin.logger
 
-            if (!localRoot.exists()) {
-                logger.warning("[AutoSync] 本地目录不存在：${localRoot.absolutePath}")
+            if (!playerRoot.exists()) {
+                logger.warning("[AutoSync] replay/player 目录不存在：${playerRoot.absolutePath}")
                 return
             }
 
-            // 1) 收集本地文件（排除 ignore）
-            val localFiles = collectLocalFiles(localRoot, localRoot, cfg.exclude)
-            // 2) 远程现有文件
-            val remoteFiles = client.listRemoteTree(cfg.remoteFolder)
+            // 1) 收集本地 .mcpr 录像文件（相对 playerRoot 的路径，如 张三@uuid/2026-08-13.mcpr）
+            val localFiles = collectMcprFiles(playerRoot, playerRoot)
+            logger.info("[AutoSync] 发现 ${localFiles.size} 个录像文件")
 
-            // 3) 本地 → 远程（新增/更新）
+            // 2) 远程现有文件（replay/player 目录下）
+            val remoteFiles = client.listRemoteTree("replay/player")
+
+            // 3) 上传本地新增/修改的录像（只推不拉）
             var pushed = 0
+            var skipped = 0
             for ((relPath, localFile) in localFiles) {
-                val remotePath = "${cfg.remoteFolder.trimEnd('/')}/$relPath"
+                val size = localFile.length()
+
+                // 跳过超大文件（GitHub Contents API 上限 100MB）
+                if (size > MAX_FILE_SIZE) {
+                    logger.warning("[AutoSync] 跳过超大文件（>${MAX_FILE_SIZE / 1024 / 1024}MB）：$relPath（${size / 1024 / 1024}MB）")
+                    skipped++
+                    continue
+                }
+
+                val remotePath = "replay/player/$relPath"
                 val remoteSha = remoteFiles[relPath]
-                val localContent = readText(localFile)
-                val remoteContent = remoteSha?.let { client.getFileContent(remotePath) }
-                // 内容一致则跳过
-                if (remoteContent == localContent) continue
-                if (client.putFile(remotePath, localContent, remoteSha)) {
+                // 远程已存在同名文件则跳过（录像一旦生成不会修改）
+                if (remoteSha != null) {
+                    continue
+                }
+                if (client.putFileBytes(remotePath, Files.readAllBytes(localFile.toPath()), remoteSha)) {
                     pushed++
-                    logger.info("[AutoSync] 已推送 $relPath")
+                    logger.info("[AutoSync] 已上传 $relPath（${size / 1024}KB）")
                 }
             }
-
-            // 4) 远程 → 本地（拉取远程独有文件）
-            var pulled = 0
-            for ((relPath, sha) in remoteFiles) {
-                if (localFiles.containsKey(relPath)) continue
-                val localFile = File(localRoot, relPath)
-                localFile.parentFile?.mkdirs()
-                val content = client.getFileContent("${cfg.remoteFolder.trimEnd('/')}/$relPath")
-                    ?: continue
-                if (writeText(localFile, content)) {
-                    pulled++
-                    logger.info("[AutoSync] 已拉取 $relPath")
-                }
-            }
-
-            // 5) 清理：仓库比本地多的已删文件 → 仓库删除（受 delete-remote 控制）
-            //    本地存在、远程没有 → 已在第 3 步新建上传，无需删除
 
             val ms = System.currentTimeMillis() - start
-            logger.info("[AutoSync] 同步完成：推送 $pushed / 拉取 $pulled（${ms}ms）")
+            logger.info("[AutoSync] 同步完成：上传 $pushed，跳过 $skipped（${ms}ms）")
         } catch (e: Exception) {
             plugin.logger.warning("[AutoSync] 同步失败：${e.message}")
             if (plugin.config.getBoolean("debug", false)) {
@@ -79,36 +80,23 @@ class SyncManager(private val plugin: AutoSyncPlugin) {
 
     // ---------- 内部 ----------
 
-    private fun collectLocalFiles(root: File, dir: File, excludes: List<String>): Map<String, File> {
+    companion object {
+        /** GitHub Contents API 单文件上限：100MB */
+        private const val MAX_FILE_SIZE = 100L * 1024 * 1024
+    }
+
+    /** 递归收集 replay 目录下所有 .mcpr 文件 */
+    private fun collectMcprFiles(root: File, dir: File): Map<String, File> {
         val result = LinkedHashMap<String, File>()
         val children = dir.listFiles()?.sortedBy { it.name } ?: return result
         for (f in children) {
             val rel = root.toPath().relativize(f.toPath()).toString().replace('\\', '/')
-            if (isExcluded(rel, excludes)) continue
             if (f.isDirectory) {
-                result.putAll(collectLocalFiles(root, f, excludes))
-            } else {
+                result.putAll(collectMcprFiles(root, f))
+            } else if (f.name.endsWith(".mcpr")) {
                 result[rel] = f
             }
         }
         return result
     }
-
-    private fun isExcluded(rel: String, excludes: List<String>): Boolean =
-        excludes.any {
-            val p = it.trim().trim('/')
-            rel == p || rel.startsWith("$p/")
-        }
-
-    private fun readText(file: File): String =
-        String(Files.readAllBytes(file.toPath()), Charsets.UTF_8)
-
-    private fun writeText(file: File, content: String): Boolean =
-        try {
-            Files.write(file.toPath(), content.toByteArray(Charsets.UTF_8))
-            true
-        } catch (e: Exception) {
-            plugin.logger.warning("[AutoSync] 写入本地失败 ${file.name}: ${e.message}")
-            false
-        }
 }

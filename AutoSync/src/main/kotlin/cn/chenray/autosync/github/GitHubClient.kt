@@ -72,6 +72,22 @@ class GitHubClient(
     }
 
     /**
+     * 上传二进制文件（.mcpr 录像等）。
+     * GitHub Contents API 要求 base64 编码，单文件最大 100MB。
+     */
+    fun putFileBytes(path: String, bytes: ByteArray, sha: String?): Boolean {
+        val body = JsonObject().apply {
+            addProperty("message", "[AutoSync] upload $path")
+            addProperty("content", Base64.getEncoder().encodeToString(bytes))
+            addProperty("branch", branch)
+            if (sha != null) addProperty("sha", sha)
+        }
+        val url = "$API_BASE/repos/$owner/$repo/contents/${encodePath(path)}"
+        val resp = sendJson("PUT", url, body.toString())
+        return resp != null && (resp.has("content") || resp.has("commit"))
+    }
+
+    /**
      * 删除远程文件。
      */
     fun deleteFile(path: String, sha: String): Boolean {
