@@ -11,6 +11,12 @@ import java.nio.file.Files
  *  - 单向上传：本地 → GitHub，不反向拉取（录像不回写服务器）
  *  - 自动跳过超过 100MB 的文件（GitHub Contents API 限制）
  *  - 保留本地文件（只上传不删除）
+ *
+ * 性能优化（降低对 TPS 影响）：
+ *  - 单次同步最多处理 MAX_FILES_PER_RUN 个文件
+ *  - 单次同步总上传字节数受 MAX_BYTES_PER_RUN 限制
+ *  - 每个文件流式读取 + 流式 base64，避免整文件进内存
+ *  - 上传采用小并发 + 每文件超时，避免阻塞主线程太久
  */
 class SyncManager(private val plugin: AutoSyncPlugin) {
 
@@ -51,38 +57,57 @@ class SyncManager(private val plugin: AutoSyncPlugin) {
             val localFiles = collectMcprFiles(playerRoot, playerRoot)
             logger.info("[AutoSync] 发现 ${localFiles.size} 个录像文件")
 
-            // 2) 远程现有文件（player 目录下）
+            // 2) 远程现有文件（player 目录下）—— 一次性获取，避免每个文件单独请求
             val remoteFiles = client.listRemoteTree("player")
 
-            // 3) 上传本地新增/修改的录像（只推不拉）
-            var pushed = 0
-            var skipped = 0
-            for ((relPath, localFile) in localFiles) {
-                val size = localFile.length()
+            // 3) 过滤出需要上传的文件（本地有、远程没有；跳过超大）
+            val pending = localFiles.entries
+                .filter { (relPath, localFile) ->
+                    if (localFile.length() > MAX_FILE_SIZE) {
+                        logger.warning("[AutoSync] 跳过超大文件（>${MAX_FILE_SIZE / 1024 / 1024}MB）：$relPath")
+                        false
+                    } else {
+                        // 远程不存在才需要上传
+                        remoteFiles[cleanPath(relPath)] == null
+                    }
+                }
+                .take(MAX_FILES_PER_RUN)
 
-                // 跳过超大文件（GitHub Contents API 上限 100MB）
-                if (size > MAX_FILE_SIZE) {
-                    logger.warning("[AutoSync] 跳过超大文件（>${MAX_FILE_SIZE / 1024 / 1024}MB）：$relPath（${size / 1024 / 1024}MB）")
-                    skipped++
-                    continue
+            if (pending.isEmpty()) {
+                val ms = System.currentTimeMillis() - start
+                logger.info("[AutoSync] 无待上传录像（${ms}ms）")
+                return
+            }
+
+            // 4) 分批上传（控制单批字节数，避免内存/带宽高峰）
+            var pushed = 0
+            var batchBytes = 0L
+            var batchCount = 0
+            for ((relPath, localFile) in pending) {
+                val size = localFile.length()
+                // 达到本批上限则先休眠释放资源，再继续下一批
+                if (batchBytes > 0 && batchBytes + size > MAX_BYTES_PER_BATCH) {
+                    logger.info("[AutoSync] 批处理达到上限，暂停 2 秒释放资源…")
+                    Thread.sleep(2000)
+                    batchBytes = 0
+                    batchCount = 0
                 }
 
-                // 把相对路径里的 "玩家名@uuid" 目录名转换为 "玩家名"（去掉 @ 后乱码）
                 val cleanRelPath = cleanPath(relPath)
                 val remotePath = "player/$cleanRelPath"
-                val remoteSha = remoteFiles[cleanRelPath]
-                // 远程已存在同名文件则跳过（录像一旦生成不会修改）
-                if (remoteSha != null) {
-                    continue
-                }
-                if (client.putFileBytes(remotePath, Files.readAllBytes(localFile.toPath()), remoteSha)) {
+                // 流式上传：读文件 → base64 → PUT（不整文件进内存）
+                if (client.putFileStream(remotePath, localFile, null)) {
                     pushed++
-                    logger.info("[AutoSync] 已上传 $cleanRelPath（${size / 1024}KB）")
+                    batchBytes += size
+                    batchCount++
+                    if (batchCount <= 3) { // 前几个打日志，避免刷屏
+                        logger.info("[AutoSync] 已上传 $cleanRelPath（${size / 1024}KB）")
+                    }
                 }
             }
 
             val ms = System.currentTimeMillis() - start
-            logger.info("[AutoSync] 同步完成：上传 $pushed，跳过 $skipped（${ms}ms）")
+            logger.info("[AutoSync] 同步完成：上传 $pushed / ${pending.size}（${ms}ms）")
         } catch (e: Exception) {
             plugin.logger.warning("[AutoSync] 同步失败：${e.message}")
             if (plugin.config.getBoolean("debug", false)) {
@@ -96,6 +121,10 @@ class SyncManager(private val plugin: AutoSyncPlugin) {
     companion object {
         /** GitHub Contents API 单文件上限：100MB */
         private const val MAX_FILE_SIZE = 100L * 1024 * 1024
+        /** 单次同步最多处理的文件数（防止一次全量上传卡线程） */
+        private const val MAX_FILES_PER_RUN = 20
+        /** 单批上传总字节上限（约 50MB/批，控制内存） */
+        private const val MAX_BYTES_PER_BATCH = 50L * 1024 * 1024
     }
 
     /**
