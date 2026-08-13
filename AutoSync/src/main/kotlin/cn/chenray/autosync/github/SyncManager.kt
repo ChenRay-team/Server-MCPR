@@ -21,7 +21,17 @@ class SyncManager(private val plugin: AutoSyncPlugin) {
 
     /** 服务器根目录（server.jar 同级，即翼龙 /home/container） */
     private val serverRoot: File
-        get() = plugin.dataFolder.parentFile.parentFile
+        get() {
+            // 优先用 Bukkit 的世界容器目录作为服务器根（更可靠，避免 dataFolder.parentFile 为 null）
+            val worldContainer = plugin.server.worldContainer
+            return if (worldContainer.exists()) {
+                worldContainer
+            } else {
+                // 兜底：dataFolder 的上级上级（plugins -> 根目录）
+                val plugins = plugin.dataFolder.parentFile
+                plugins?.parentFile ?: File(System.getProperty("user.dir", "."))
+            }
+        }
 
     /** replay/player 根目录：/home/container/replay/player */
     private val playerRoot: File
