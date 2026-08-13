@@ -1,8 +1,0 @@
-target/
-bin/
-out/
-*.class
-*.jar
-.idea/
-*.iml
-.vscode/
