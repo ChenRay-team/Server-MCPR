@@ -8,6 +8,7 @@ import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.charset.StandardCharsets
+import java.nio.file.Files
 import java.util.Base64
 
 /**
@@ -88,71 +89,17 @@ class GitHubClient(
     }
 
     /**
-     * 流式上传本地文件（内存友好，避免大文件整读进堆）。
-     * 流程：文件 → base64（流式）→ JSON 请求体 → PUT。
-     * 相比 putFileBytes 不会同时持有 [原始bytes + base64字符串 + JSON串] 三份大内存。
+     * 上传本地文件（.mcpr 录像）。
+     * GitHub Contents API 要求 base64 编码，单文件最大 100MB。
+     *
+     * 实现：读取文件字节 → 标准 base64 编码 → Gson 构造 JSON → PUT。
+     * 采用与 putFileBytes 相同的可靠 base64 路径，避免流式编码器的
+     * flush/close 陷阱导致内容不完整（0 字节/非法 base64）。
      */
     fun putFileStream(path: String, file: File, sha: String?): Boolean {
-        val url = "$API_BASE/repos/$owner/$repo/contents/${encodePath(path)}"
-        val conn = openConn(url)
-        try {
-            conn.requestMethod = "PUT"
-            conn.doOutput = true
-            conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
-            conn.setChunkedStreamingMode(8192) // 流式发送，避免整包缓冲
-
-            // 手动构造 JSON：message / content / branch / sha
-            val body = StringBuilder(4096).apply {
-                append("{\"message\":\"[AutoSync] upload ")
-                append(escapeJson(path))
-                append("\",\"content\":\"")
-            }
-            conn.outputStream.use { os ->
-                // 先写 JSON 前半段
-                os.write(body.toString().toByteArray(StandardCharsets.UTF_8))
-
-                // 流式 base64 编码文件内容，边读边写
-                val encoder = Base64.getEncoder()
-                var buffer = ByteArray(64 * 1024)
-                file.inputStream().use { ins ->
-                    var read: Int
-                    while (ins.read(buffer).also { read = it } != -1) {
-                        if (read < buffer.size) buffer = buffer.copyOf(read)
-                        val encoded = encoder.encode(buffer)
-                        os.write(encoded)
-                    }
-                }
-
-                // 写 JSON 后半段
-                val tail = StringBuilder(256).apply {
-                    append("\",\"branch\":\"")
-                    append(escapeJson(branch))
-                    append("\"")
-                    if (sha != null) {
-                        append(",\"sha\":\"")
-                        append(escapeJson(sha))
-                        append("\"")
-                    }
-                    append("}")
-                }
-                os.write(tail.toString().toByteArray(StandardCharsets.UTF_8))
-            }
-
-            val code = conn.responseCode
-            val text = if (code in 200..299) {
-                conn.inputStream?.bufferedReader(StandardCharsets.UTF_8)?.readText() ?: ""
-            } else {
-                conn.errorStream?.bufferedReader(StandardCharsets.UTF_8)?.readText() ?: ""
-            }
-            if (code !in 200..299) {
-                System.err.println("[AutoSync] GitHub API $code: $text")
-                return false
-            }
-            val resp = if (text.isBlank()) JsonObject() else JsonParser.parseString(text).asJsonObject
-            return resp.has("content") || resp.has("commit")
-        } finally {
-            conn.disconnect()
-        }
+        // 单文件 <100MB 时整读 + 标准 base64 是最可靠的（正常录像仅几 MB）
+        val bytes = Files.readAllBytes(file.toPath())
+        return putFileBytes(path, bytes, sha)
     }
 
     /** 转义 JSON 字符串（用于手动构造请求体） */
