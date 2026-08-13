@@ -56,15 +56,17 @@ class SyncManager(private val plugin: AutoSyncPlugin) {
                     continue
                 }
 
-                val remotePath = "replay/player/$relPath"
-                val remoteSha = remoteFiles[relPath]
+                // 把相对路径里的 "玩家名@uuid" 目录名转换为 "玩家名"（去掉 @ 后乱码）
+                val cleanRelPath = cleanPath(relPath)
+                val remotePath = "replay/player/$cleanRelPath"
+                val remoteSha = remoteFiles[cleanRelPath]
                 // 远程已存在同名文件则跳过（录像一旦生成不会修改）
                 if (remoteSha != null) {
                     continue
                 }
                 if (client.putFileBytes(remotePath, Files.readAllBytes(localFile.toPath()), remoteSha)) {
                     pushed++
-                    logger.info("[AutoSync] 已上传 $relPath（${size / 1024}KB）")
+                    logger.info("[AutoSync] 已上传 $cleanRelPath（${size / 1024}KB）")
                 }
             }
 
@@ -83,6 +85,18 @@ class SyncManager(private val plugin: AutoSyncPlugin) {
     companion object {
         /** GitHub Contents API 单文件上限：100MB */
         private const val MAX_FILE_SIZE = 100L * 1024 * 1024
+    }
+
+    /**
+     * 把相对路径中每个目录段的 "名字@uuid" 转换为 "名字"。
+     * 例如：
+     *   "张三@a1b2c3d4-e5f6/2026-08-13.mcpr"
+     *     → "张三/2026-08-13.mcpr"
+     */
+    private fun cleanPath(relPath: String): String {
+        return relPath.split("/").joinToString("/") { seg ->
+            if (seg.contains("@")) seg.substringBefore("@") else seg
+        }
     }
 
     /** 递归收集 replay 目录下所有 .mcpr 文件 */
