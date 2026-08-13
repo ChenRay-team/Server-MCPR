@@ -4,7 +4,7 @@
 #  适用：翼龙面板（不能执行 Linux 指令 / git）环境
 #
 #  同步的本地目录：/home/container/replay/player/玩家名/xxx.mcpr
-#  上传到仓库的路径：replay/player/玩家名/xxx.mcpr
+#  上传到仓库的路径：player/玩家名/xxx.mcpr
 #
 #  使用方法：
 #   1. 在 GitHub 生成 Personal Access Token（勾选 repo 权限）

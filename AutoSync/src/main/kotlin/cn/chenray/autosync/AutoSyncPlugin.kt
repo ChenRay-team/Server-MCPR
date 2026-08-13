@@ -44,7 +44,7 @@ class AutoSyncPlugin : JavaPlugin() {
             intervalTicks,
         )
 
-        logger.info("AutoSync 已启用：每 ${syncConfig.intervalMinutes} 分钟上传 replay/player 录像到 ${syncConfig.owner}/${syncConfig.repo} 仓库的 ${syncConfig.branch} 分支")
+        logger.info("AutoSync 已启用：每 ${syncConfig.intervalMinutes} 分钟上传录像到 ${syncConfig.owner}/${syncConfig.repo} 仓库的 player 目录（${syncConfig.branch} 分支）")
         getCommand("autosync")?.setExecutor { _, _, _, args ->
             when (args.firstOrNull()?.lowercase()) {
                 "now" -> {

@@ -7,6 +7,7 @@ import java.nio.file.Files
 /**
  * 同步管理器（录像模式）：
  *  - 扫描服务器根目录 replay/player 下的 .mcpr 录像（含 玩家名/ 子目录）
+ *  - 上传到仓库的 player/ 目录（仓库只显示 player 文件夹）
  *  - 单向上传：本地 → GitHub，不反向拉取（录像不回写服务器）
  *  - 自动跳过超过 100MB 的文件（GitHub Contents API 限制）
  *  - 保留本地文件（只上传不删除）
@@ -40,8 +41,8 @@ class SyncManager(private val plugin: AutoSyncPlugin) {
             val localFiles = collectMcprFiles(playerRoot, playerRoot)
             logger.info("[AutoSync] 发现 ${localFiles.size} 个录像文件")
 
-            // 2) 远程现有文件（replay/player 目录下）
-            val remoteFiles = client.listRemoteTree("replay/player")
+            // 2) 远程现有文件（player 目录下）
+            val remoteFiles = client.listRemoteTree("player")
 
             // 3) 上传本地新增/修改的录像（只推不拉）
             var pushed = 0
@@ -58,7 +59,7 @@ class SyncManager(private val plugin: AutoSyncPlugin) {
 
                 // 把相对路径里的 "玩家名@uuid" 目录名转换为 "玩家名"（去掉 @ 后乱码）
                 val cleanRelPath = cleanPath(relPath)
-                val remotePath = "replay/player/$cleanRelPath"
+                val remotePath = "player/$cleanRelPath"
                 val remoteSha = remoteFiles[cleanRelPath]
                 // 远程已存在同名文件则跳过（录像一旦生成不会修改）
                 if (remoteSha != null) {
